@@ -16,6 +16,7 @@ pub(crate) struct GenerateArgs {
 }
 
 impl Task for GenerateArgs {
+    // 内联函数减少开销
     #[inline]
     fn inference(&self) -> &InferenceArgs {
         &self.inference
@@ -27,8 +28,9 @@ impl Task for GenerateArgs {
         M::Storage: Send,
         M::Error: Debug,
     {
+        // 加载模型和元数据
         let (service, _handle) = Service::<M>::load(&self.inference.model, meta);
-
+        // 获取提示词进行对话，能输入文件
         let prompt = if Path::new(&self.prompt).is_file() {
             println!("prompt from file: {}", self.prompt);
             std::fs::read_to_string(&self.prompt).unwrap()

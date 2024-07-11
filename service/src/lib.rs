@@ -16,7 +16,9 @@ pub use session_manager::{SessionError, SessionManager};
 
 /// 对话服务。
 pub struct Service<M: CausalLM> {
+    // 共享组件，用于模型推理
     component: Arc<ServiceComponent<M>>,
+    // 用户自定义组件
     pub default_sample: SampleArgs,
 }
 
@@ -44,7 +46,9 @@ where
     M::Storage: Send,
     M::Error: Debug,
 {
+    /// 加载模型文件和元数据
     pub fn load(model_dir: impl AsRef<Path>, meta: M::Meta) -> (Self, JoinHandle<()>) {
+        // Dispatcher器
         let handle = Arc::new(Dispatcher::from(M::load(&model_dir, meta).unwrap()));
         (
             Self {
@@ -56,6 +60,7 @@ where
                 }),
                 default_sample: Default::default(),
             },
+            // 启动推理任务，在阻塞线程中运行
             tokio::task::spawn_blocking(move || handle.run()),
         )
     }

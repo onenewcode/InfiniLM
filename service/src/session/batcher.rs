@@ -2,6 +2,7 @@
 
 pub struct Batcher<T> {
     queue: Mutex<(Vec<T>, bool)>,
+    // 用来同步线程
     condvar: Condvar,
 }
 
@@ -26,6 +27,8 @@ impl<T> Batcher<T> {
 
     #[inline]
     pub fn deq(&self) -> Vec<T> {
+        // 转移所有权，并且清空队列
+        // 阻塞直到队列不为空
         std::mem::take(
             &mut self
                 .condvar

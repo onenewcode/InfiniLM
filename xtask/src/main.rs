@@ -14,7 +14,7 @@ use time::UtcOffset;
 
 #[macro_use]
 extern crate clap;
-
+// 通过.cargo中config.toml中配置[alias]中
 fn main() {
     use Commands::*;
     match Cli::parse().command {
