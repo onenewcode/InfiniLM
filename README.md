@@ -7,6 +7,8 @@
 ![GitHub contributors](https://img.shields.io/github/contributors/InfiniTensor/transformer-rs)
 ![GitHub commit activity](https://img.shields.io/github/commit-activity/m/InfiniTensor/transformer-rs)
 
+[**使用指南**](/docs/user-guide/doc.md)
+
 从 [YdrMaster/llama2.rs](https://github.com/YdrMaster/llama2.rs) 发展来的手写 transformer 模型项目。
 
 ## 使用

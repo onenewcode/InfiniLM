@@ -1,7 +1,7 @@
 ﻿use crate::{print_now, InferenceArgs, Task};
 use causal_lm::CausalLM;
 use colored::Colorize;
-use service::{Service, Session};
+use service::{Message, Service, Session};
 use std::{collections::HashMap, fmt::Debug};
 
 #[derive(Args, Default)]
@@ -224,10 +224,13 @@ impl<M: CausalLM> Chatting<M> {
         true
     }
 
-    async fn infer(&mut self, text: &str) {
+    async fn infer(&mut self, content: &str) {
         print_now!("{}", "AI: ".green());
         let session = self.session_mut();
-        session.extend([text]);
+        session.extend(&[Message {
+            role: "user",
+            content,
+        }]);
         let mut busy = session.chat();
         while let Some(s) = busy.decode().await {
             match &*s {

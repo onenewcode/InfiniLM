@@ -9,6 +9,7 @@ use std::path::Path;
 use tensor::udim;
 
 pub struct MixtralCPU {
+    bos_token: utok,
     eos_token: utok,
     data_type: DigitLayout,
     nlayers: udim,
@@ -33,6 +34,7 @@ impl Model for MixtralCPU {
     fn load(model_dir: impl AsRef<Path>, _: Self::Meta) -> Result<Self, Self::Error> {
         let config = ConfigJson::load(&model_dir)?;
         Ok(Self {
+            bos_token: config.bos_token_id,
             eos_token: config.eos_token_id,
             data_type: config.data_layout(),
             nlayers: config.num_hidden_layers as _,

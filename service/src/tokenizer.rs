@@ -1,4 +1,21 @@
-﻿use std::borrow::Cow;
+use std::borrow::Cow;
+use tokeneer::{utok, Tokeneer};
+
+pub trait Tokenize {
+    fn encode(&self, text: &str) -> Vec<utok>;
+    fn decode(&self, token: utok) -> &str;
+}
+
+impl<M: tokeneer::Method> Tokenize for Tokeneer<M> {
+    #[inline]
+    fn encode(&self, text: &str) -> Vec<utok> {
+        self.encode(text)
+    }
+    #[inline]
+    fn decode(&self, token: utok) -> &str {
+        unsafe { std::str::from_utf8_unchecked(self.internal().decode(token)) }
+    }
+}
 
 pub trait Normalizer {
     fn encode<'a>(&self, text: &'a str) -> Cow<'a, str>;

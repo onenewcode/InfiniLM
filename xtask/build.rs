@@ -1,5 +1,6 @@
 ﻿fn main() {
     use build_script_cfg::Cfg;
+    use search_ascend_tools::find_ascend_toolkit_home;
     use search_cuda_tools::{find_cuda_root, find_nccl_root};
     use search_neuware_tools::find_neuware_home;
 
@@ -15,5 +16,10 @@
     let neuware = Cfg::new("detected_neuware");
     if cfg!(feature = "cambricon") && find_neuware_home().is_some() {
         neuware.define();
+    }
+
+    let ascend = Cfg::new("detected_ascend");
+    if cfg!(feature = "ascend") && find_ascend_toolkit_home().is_some() {
+        ascend.define();
     }
 }

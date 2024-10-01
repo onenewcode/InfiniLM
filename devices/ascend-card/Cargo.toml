@@ -1,5 +1,5 @@
 [package]
-name = "common-nv"
+name = "common-acl"
 version = "0.0.0"
 edition = "2021"
 authors = ["YdrMaster <ydrml@hotmail.com>"]
@@ -10,10 +10,8 @@ authors = ["YdrMaster <ydrml@hotmail.com>"]
 common = { path = "../../common" }
 common-devices = { path = "../common" }
 tensor = { path = "../../tensor" }
-rand = "0.8"
-operators = { workspace = true, features = ["nvidia-gpu"] }
-digit-layout.workspace = true
+operators = { workspace = true, features = ["ascend-card"] }
 
 [build-dependencies]
 build-script-cfg.workspace = true
-search-cuda-tools.workspace = true
+search-ascend-tools.workspace = true

@@ -129,7 +129,7 @@ where
             // 采样
             let args = zip(&tasks, &num_decode).map(|(t, &num_decode)| SampleMeta {
                 num_decode,
-                args: t.sample().clone(),
+                args: *t.sample(),
             });
             let tokens = self.model.sample(args, logits);
             // 为每次推理启动一个任务执行发射

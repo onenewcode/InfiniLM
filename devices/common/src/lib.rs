@@ -1,7 +1,5 @@
 use common::utok;
-use operators::{
-    fuesd_softmax, mat_mul, reform, rms_norm, rope, swiglu, Handle, Operator, QueueOf,
-};
+use operators::{fuesd_softmax, mat_mul, mlp, reform, rms_norm, rope, Handle, Operator, QueueOf};
 use std::ops::{Deref, DerefMut};
 use tensor::Tensor;
 
@@ -18,7 +16,7 @@ pub trait Operators {
         &self,
         queue: &QueueOf<Self::Handle>,
     ) -> &impl fuesd_softmax::FusedSoftmax<Self::Handle>;
-    fn swiglu_op(&self, queue: &QueueOf<Self::Handle>) -> &impl swiglu::Swiglu<Self::Handle>;
+    fn mlp_op(&self, queue: &QueueOf<Self::Handle>) -> &impl mlp::Mlp<Self::Handle>;
 }
 
 pub trait KernelsA {
@@ -68,10 +66,23 @@ pub trait KernelsA {
     where
         T: DerefMut<Target = SliceOn<Self::Handle>>;
 
-    fn swiglu<T, U>(&self, gate: &mut Tensor<T>, up: &Tensor<U>, queue: &QueueOf<Self::Handle>)
-    where
-        T: DerefMut<Target = SliceOn<Self::Handle>>,
-        U: Deref<Target = SliceOn<Self::Handle>>;
+    #[allow(clippy::too_many_arguments)]
+    fn mlp<M0, M1, C0, C1, C2>(
+        &self,
+        x: &mut Tensor<M0>,
+        x1: &Tensor<C0>,
+        gate_up: &mut Tensor<M1>,
+        w_gate_up: &Tensor<C1>,
+        w_down: &Tensor<C2>,
+        down_alpha: f32,
+        down_bias: bool,
+        queue: &QueueOf<Self::Handle>,
+    ) where
+        M0: DerefMut<Target = SliceOn<Self::Handle>>,
+        M1: DerefMut<Target = SliceOn<Self::Handle>>,
+        C0: Deref<Target = SliceOn<Self::Handle>>,
+        C1: Deref<Target = SliceOn<Self::Handle>>,
+        C2: Deref<Target = SliceOn<Self::Handle>>;
 }
 
 pub trait KernelsB {
@@ -99,17 +110,24 @@ impl<Ops: Operators> KernelsA for Ops {
         T: DerefMut<Target = SliceOn<Self::Handle>>,
         U: Deref<Target = SliceOn<Self::Handle>>,
     {
-        self.reform_op(queue)
-            .launch(
-                &reform::Args {
-                    dst_layout: dst.layout(),
-                    dst_base: dst.base_mut(),
-                    src_layout: src.layout(),
-                    src_base: src.base(),
-                },
-                queue,
-            )
-            .unwrap();
+        if let Err(e) = self.reform_op(queue).launch(
+            &reform::Args {
+                dst_layout: dst.layout(),
+                dst_base: dst.base_mut(),
+                src_layout: src.layout(),
+                src_base: src.base(),
+            },
+            queue,
+        ) {
+            panic!(
+                "\
+reform failed: {e}
+{:?}|{:?}->{:?}",
+                src.shape(),
+                src.strides(),
+                dst.strides(),
+            );
+        }
     }
 
     fn rms_norm<T, U, V>(
@@ -209,18 +227,38 @@ impl<Ops: Operators> KernelsA for Ops {
             .unwrap();
     }
 
-    fn swiglu<T, U>(&self, gate: &mut Tensor<T>, up: &Tensor<U>, queue: &QueueOf<Self::Handle>)
-    where
-        T: DerefMut<Target = SliceOn<Self::Handle>>,
-        U: Deref<Target = SliceOn<Self::Handle>>,
+    fn mlp<M0, M1, C0, C1, C2>(
+        &self,
+        x: &mut Tensor<M0>,
+        x1: &Tensor<C0>,
+        gate_up: &mut Tensor<M1>,
+        w_gate_up: &Tensor<C1>,
+        w_down: &Tensor<C2>,
+        down_alpha: f32,
+        down_bias: bool,
+        queue: &QueueOf<Self::Handle>,
+    ) where
+        M0: DerefMut<Target = SliceOn<Self::Handle>>,
+        M1: DerefMut<Target = SliceOn<Self::Handle>>,
+        C0: Deref<Target = SliceOn<Self::Handle>>,
+        C1: Deref<Target = SliceOn<Self::Handle>>,
+        C2: Deref<Target = SliceOn<Self::Handle>>,
     {
-        self.swiglu_op(queue)
+        self.mlp_op(queue)
             .launch(
-                &swiglu::Args {
-                    gate_layout: gate.layout(),
-                    gate_base: gate.base_mut(),
-                    up_layout: up.layout(),
-                    up_base: up.base(),
+                &mlp::Args {
+                    y_layout: x.layout(),
+                    y_base: x.base_mut(),
+                    x_layout: x1.layout(),
+                    x_base: x1.base(),
+                    gate_up_layout: gate_up.layout(),
+                    gate_up_base: gate_up.base_mut(),
+                    w_gate_up_layout: w_gate_up.layout(),
+                    w_gate_up_base: w_gate_up.base(),
+                    w_down_layout: w_down.layout(),
+                    w_down_base: w_down.base(),
+                    down_alpha,
+                    down_bias,
                 },
                 queue,
             )

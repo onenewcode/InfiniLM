@@ -147,7 +147,9 @@ fn test_load() {
 
     const N: usize = 1;
 
-    cuda::init();
+    if let Err(cuda::NoDevice) = cuda::init() {
+        return;
+    }
     if Device::count() < N {
         return;
     }

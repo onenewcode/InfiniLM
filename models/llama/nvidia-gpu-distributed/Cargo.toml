@@ -12,7 +12,6 @@ common-nv = { path = "../../../devices/nvidia-gpu" }
 causal-lm = { path = "../../../causal-lm" }
 llama = { path = "../common" }
 digit-layout.workspace = true
-nccl.workspace = true
 log.workspace = true
 itertools.workspace = true
 

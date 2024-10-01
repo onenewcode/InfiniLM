@@ -4,7 +4,10 @@ use common_cpu::{
     tensor::{reslice, slice, udim, Tensor},
     CpuKernels, Kernels, KernelsA, KernelsB, ThisThread,
 };
-use llama::{ComputeConst, ComputeStream, Handle, LayerStorage, QueueOf, SliceOn, Storage, Weight};
+use llama::{
+    ComputeConst, ComputeStream, Handle, InferenceConfig, LayerStorage, QueueOf, SliceOn, Storage,
+    Weight,
+};
 use std::{iter::repeat, ops::Deref, path::Path, slice::from_raw_parts};
 
 pub struct Transformer {
@@ -120,6 +123,10 @@ impl CausalLM for Transformer {
         self.s.config.max_seq_len
     }
     #[inline]
+    fn bos_token(&self) -> utok {
+        self.s.config.bos_token
+    }
+    #[inline]
     fn eos_token(&self) -> utok {
         self.s.config.eos_token
     }
@@ -129,12 +136,10 @@ impl CausalLM for Transformer {
     }
     #[inline]
     fn duplicate_cache(&self, cache: &Tensor<Self::Storage>, pos: upos) -> Tensor<Self::Storage> {
-        self.s
-            .config
-            .duplicate_cache(cache, pos, Blob::new, |dst, src| {
-                src.map_physical(|u| &**u)
-                    .reform_to(&mut dst.map_physical(|u| &mut **u))
-            })
+        InferenceConfig::duplicate_cache(cache, pos, Blob::new, |dst, src| {
+            src.map_physical(|u| &**u)
+                .reform_to(&mut dst.map_physical(|u| &mut **u))
+        })
     }
 
     fn token_embed(&self, queries: impl IntoIterator<Item = utok>) -> Tensor<Self::Storage> {
@@ -201,7 +206,14 @@ impl CausalLM for Transformer {
         args.into_iter()
             .flat_map(|meta| repeat(meta.args).take(meta.num_decode))
             .enumerate()
-            .map(|(i, args)| args.random(&common_cpu::slice!(logits; voc; [i])))
+            .map(|(i, args)| {
+                self.kernels.sample(
+                    args.temperature,
+                    args.top_p,
+                    args.top_k,
+                    &common_cpu::slice!(logits; voc; [i]),
+                )
+            })
             .collect()
     }
 }

@@ -10,8 +10,8 @@ use std::path::Path;
 use tensor::{udim, Tensor};
 
 pub use decoding::DecodingMeta;
+pub use operators::random_sample::SampleArgs;
 pub use query_context::QueryContext;
-pub use sample::SampleArgs;
 
 /// 从文件系统加载的模型。
 pub trait Model: Sized {
@@ -43,6 +43,8 @@ pub trait CausalLM: Model {
     type Storage;
     /// 最大序列长度。
     fn max_seq_len(&self) -> upos;
+    /// 模型定义的句子起始符。
+    fn bos_token(&self) -> utok;
     /// 模型定义的句子结束符。
     fn eos_token(&self) -> utok;
     /// 创建一个未填充的缓存张量（`num_layers x 2 x num_kv_head x max_seq_len x head_dim`）。
@@ -142,7 +144,7 @@ where
 
         let args = [SampleMeta {
             num_decode: 1,
-            args: SampleArgs::default(),
+            args: SampleArgs::ARG_MAX,
         }];
         let tokens = CausalLM::sample(&model, args, logits);
 

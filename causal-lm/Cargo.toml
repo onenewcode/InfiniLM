@@ -9,5 +9,5 @@ authors = ["YdrMaster <ydrml@hotmail.com>"]
 [dependencies]
 common = { path = "../common" }
 tensor = { path = "../tensor" }
-sample = { path = "../sample" }
 digit-layout.workspace = true
+operators.workspace = true

@@ -20,7 +20,7 @@ fn main() {
     match Cli::parse().command {
         ListTurbo => list_turbo::list_turbo(),
         Deploy(deploy) => deploy.deploy(),
-        Cast(cast) => cast.invode(),
+        Cast(cast) => cast.invoke(),
         Generate(args) => args.run(),
         Chat(chat) => chat.run(),
         Service(service) => service.run(),
@@ -169,16 +169,6 @@ trait Task: Sized {
         self.inference().init_log();
         // 启动 tokio 运行时
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        // 如果感知到 cuda 环境则初始化
-        #[cfg(detected_cuda)]
-        {
-            llama_nv::cuda::init();
-        }
-        // 如果感知到寒武纪环境则初始化
-        #[cfg(detected_neuware)]
-        {
-            llama_cn::cndrv::init();
-        }
 
         let (turbo, _detail) = self.inference().turbo();
         match self.inference().model_type() {
@@ -188,57 +178,53 @@ trait Task: Sized {
                     runtime.block_on(self.typed::<M>(()));
                 }
                 #[cfg(detected_cuda)]
-                "nv" | "nvidia" => match &*_detail
-                    .parse::<VecOrRange>()
-                    .unwrap()
-                    .into_vec(llama_nv::cuda::Device::count)
-                {
-                    [] => {
-                        use llama_nv::{ModelLoadMeta, Transformer as M};
-                        let meta = ModelLoadMeta::load_all_to(0);
-                        runtime.block_on(self.typed::<M>(meta));
+                "nv" | "nvidia" if llama_nv::cuda::init().is_ok() => {
+                    match &*_detail
+                        .parse::<VecOrRange>()
+                        .unwrap()
+                        .into_vec(llama_nv::cuda::Device::count)
+                    {
+                        [] => {
+                            use llama_nv::{ModelLoadMeta, Transformer as M};
+                            let meta = ModelLoadMeta::load_all_to(0);
+                            runtime.block_on(self.typed::<M>(meta));
+                        }
+                        &[n] => {
+                            use llama_nv::{ModelLoadMeta, Transformer as M};
+                            let meta = ModelLoadMeta::load_all_to(n);
+                            runtime.block_on(self.typed::<M>(meta));
+                        }
+                        #[cfg(detected_nccl)]
+                        list => {
+                            use llama_nv_distributed::{cuda::Device, Transformer as M};
+                            let meta = list.iter().copied().map(Device::new).collect();
+                            runtime.block_on(self.typed::<M>(meta));
+                        }
+                        #[cfg(not(detected_nccl))]
+                        _ => panic!("NCCL not detected"),
                     }
-                    &[n] => {
-                        use llama_nv::{ModelLoadMeta, Transformer as M};
-                        let meta = ModelLoadMeta::load_all_to(n);
-                        runtime.block_on(self.typed::<M>(meta));
-                    }
-                    #[cfg(detected_nccl)]
-                    list => {
-                        use llama_nv_distributed::{cuda::Device, Transformer as M};
-                        let meta = list.iter().copied().map(Device::new).collect();
-                        runtime.block_on(self.typed::<M>(meta));
-                    }
-                    #[cfg(not(detected_nccl))]
-                    _ => panic!("NCCL not detected"),
-                },
+                    llama_nv::synchronize();
+                }
                 #[cfg(detected_neuware)]
-                "cn" | "cambricon" => match &*_detail
-                    .parse::<VecOrRange>()
-                    .unwrap()
-                    .into_vec(llama_cn::cndrv::Device::count)
-                {
-                    [] => todo!(),
-                    &[_n] => todo!(),
-                    _list => todo!(),
-                },
+                "cn" | "cambricon" => {
+                    llama_cn::cndrv::init();
+                    match &*_detail
+                        .parse::<VecOrRange>()
+                        .unwrap()
+                        .into_vec(llama_cn::cndrv::Device::count)
+                    {
+                        [] => todo!(),
+                        &[_n] => todo!(),
+                        _list => todo!(),
+                    }
+                    llama_cn::synchronize();
+                }
                 _ => panic!("Turbo environment not detected"),
             },
             ModelType::Mixtral => {
                 use mixtral_cpu::MixtralCPU as M;
                 runtime.block_on(self.typed::<M>(()));
             }
-        }
-        // 正常退出
-        // 同步等待 NV 上任务结束
-        #[cfg(detected_cuda)]
-        {
-            llama_nv::synchronize();
-        }
-        // 同步等待寒武纪上任务结束
-        #[cfg(detected_neuware)]
-        {
-            llama_cn::synchronize();
         }
         // 关闭 tokio 运行时
         runtime.shutdown_background();

@@ -157,12 +157,16 @@ pub trait ComputeStream {
                 .mat_mul(&mut x, 1., &x1, &params.att_o(), 1., queue);
             self.kernels()
                 .rms_norm(&mut x1, &x, &params.mlp_layernorm(), epsilon, queue);
-            self.kernels()
-                .mat_mul(&mut gate_up, 0., &x1, &params.mlp_gate_up(), 1., queue);
-            let (mut gate, up) = split!(gate_up; [1]: di, di);
-            self.kernels().swiglu(&mut gate, &up, queue);
-            self.kernels()
-                .mat_mul(&mut x, 1., &gate, &params.mlp_down(), 1., queue);
+            self.kernels().mlp(
+                &mut x,
+                &x1,
+                &mut gate_up,
+                &params.mlp_gate_up(),
+                &params.mlp_down(),
+                1.,
+                true,
+                queue,
+            );
         }
         self.free_pos(pos.take_physical());
         self.free(state_buf.take_physical());

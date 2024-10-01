@@ -2,17 +2,18 @@
 members = [
     "common",
     "tensor",
-    "tokenizer",
     "causal-lm",
-    "sample",
+    "chat-template",
     "service",
     "web-api",
+    "android",
     "xtask",
 
     "devices/common",
     "devices/common-cpu",
     "devices/nvidia-gpu",
     "devices/cambricon-mlu",
+    "devices/ascend-card",
 
     "models/llama/common",
     "models/llama/common-cpu",
@@ -31,11 +32,11 @@ itertools = "0.13"
 serde = "1.0"
 serde_json = "1.0"
 memmap2 = "0.9"
-tokio = { version = "1.38", features = ["rt-multi-thread", "sync"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "sync"] }
 digit-layout = "0.0"
 build-script-cfg = "0.0"
 
-operators = { git = "https://github.com/YdrMaster/operators-rs", rev = "3e9b113", default-features = false }
-nccl = { git = "https://github.com/YdrMaster/cuda-driver", rev = "877df52" }
-search-cuda-tools = { git = "https://github.com/YdrMaster/cuda-driver", rev = "877df52" }
+operators = { git = "https://github.com/YdrMaster/operators-rs", rev = "4db3c62", default-features = false }
+search-cuda-tools = { git = "https://github.com/YdrMaster/cuda-driver", rev = "d089ada" }
 search-neuware-tools = "0.0"
+search-ascend-tools = { git = "https://github.com/InfiniTensor/ascendcl", rev = "1e7a696" }

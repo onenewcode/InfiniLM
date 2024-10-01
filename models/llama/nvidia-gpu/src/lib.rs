@@ -8,14 +8,13 @@ extern crate log;
 use causal_lm::{CausalLM, DecodingMeta, Model, QueryContext, SampleMeta};
 use common::{upos, utok, Blob, FileLoadError};
 use common_nv::{
-    cuda::memcpy_d2h, sample_nv, slice, udim, Gpu, Kernels, KernelsA, KernelsB, NvidiaKernels,
-    Tensor,
+    cuda::{memcpy_d2h, AsRaw},
+    slice, udim, Gpu, Kernels, KernelsA, KernelsB, NvidiaKernels, Tensor,
 };
 use cuda::{
     ContextResource, ContextSpore, DevByte, DevMem, DevMemSpore, Device, EventSpore, HostMemSpore,
     Stream, StreamSpore,
 };
-use digit_layout::types::F16;
 use llama::{ComputeConst, InferenceConfig, LayerStorage, SliceOn, Weight};
 use resource::Resource;
 use std::{
@@ -26,7 +25,7 @@ use std::{
     ops::Deref,
     path::Path,
     rc::Rc,
-    slice::from_raw_parts,
+    slice::{from_raw_parts, from_raw_parts_mut},
     sync::{Arc, Mutex, MutexGuard},
     time::Instant,
 };
@@ -42,6 +41,7 @@ struct Internal {
     resource: Arc<Resource>,
     transfer: StreamSpore,
     kernels: NvidiaKernels,
+    sample_workspace: DevMemSpore,
 
     embed_tokens: Tensor<HostMemSpore>,
     layers: Vec<LayerStorage<HostMemSpore>>,
@@ -83,8 +83,15 @@ impl Model for Transformer {
         info!("load host: {:?}", time.elapsed());
         let load_layers = (load_layers as udim).min(host.config.nlayers);
 
-        device.set_mempool_threshold(u64::MAX);
         let resource = Arc::new(Resource::new(&device));
+        device.set_mempool_threshold(u64::MAX);
+
+        // 异步编译 CUDA
+        let kernels = std::thread::spawn(move || {
+            info!("compile CUDA kernels");
+            NvidiaKernels::new(&[device], host.config.d as _, host.config.voc as _)
+        });
+
         resource.apply(|compute| {
             let ctx = compute.ctx();
             let transfer = ctx.stream();
@@ -106,22 +113,30 @@ impl Model for Transformer {
                 .take(load_layers as usize)
                 .map(|l| (l.map(from_host), transfer.record().sporulate()))
                 .collect();
+            let embed_tokens = host.embed_tokens.as_ref().map_physical(page_lock);
+            let lm_layernorm = host
+                .lm_layernorm
+                .map_physical(|u| transfer.from_host(&u).sporulate());
+            let lm_head = host
+                .lm_head
+                .map_physical(|u| transfer.from_host(&u).sporulate());
+
+            let kernels = kernels.join().unwrap();
+            let sample_workspace = kernels.sample_workspace(compute).sporulate();
 
             Ok(Self(ManuallyDrop::new(Internal {
-                kernels: NvidiaKernels::new(&[device], host.config.d as _),
-                embed_tokens: host.embed_tokens.as_ref().map_physical(page_lock),
+                embed_tokens,
                 layers,
-                lm_layernorm: host
-                    .lm_layernorm
-                    .map_physical(|u| transfer.from_host(&u).sporulate()),
-                lm_head: host
-                    .lm_head
-                    .map_physical(|u| transfer.from_host(&u).sporulate()),
+                lm_layernorm,
+                lm_head,
                 pool: Mutex::new(pool),
 
                 config: host.config,
                 resource: resource.clone(),
                 transfer: transfer.sporulate(),
+
+                kernels,
+                sample_workspace,
             })))
         })
     }
@@ -147,6 +162,10 @@ impl CausalLM for Transformer {
         self.0.config.max_seq_len
     }
     #[inline]
+    fn bos_token(&self) -> utok {
+        self.0.config.bos_token
+    }
+    #[inline]
     fn eos_token(&self) -> utok {
         self.0.config.eos_token
     }
@@ -156,7 +175,7 @@ impl CausalLM for Transformer {
     }
 
     fn duplicate_cache(&self, cache: &Tensor<Self::Storage>, pos: upos) -> Tensor<Self::Storage> {
-        self.0.config.duplicate_cache(
+        InferenceConfig::duplicate_cache(
             cache,
             pos,
             |len| self.cache(len),
@@ -276,19 +295,17 @@ impl CausalLM for Transformer {
         args: impl IntoIterator<Item = SampleMeta>,
         logits: Tensor<Self::Storage>,
     ) -> Vec<utok> {
-        assert_eq!(logits.data_layout(), F16);
-        let &[_nt, voc] = logits.shape() else {
-            panic!()
-        };
-        let voc = voc as usize;
-
+        let workspace_ptr = unsafe { self.0.sample_workspace.as_raw() };
+        let workspace_len = self.0.sample_workspace.len();
         self.0.resource.apply(|compute| {
-            sample_nv(
+            let workspace =
+                unsafe { from_raw_parts_mut(workspace_ptr as *mut DevByte, workspace_len) };
+            self.0.kernels.sample(
+                self.0.config.voc as _,
                 args.into_iter()
-                    .flat_map(|meta| repeat(meta.args).take(meta.num_decode))
-                    .enumerate(),
+                    .flat_map(|meta| repeat(meta.args).take(meta.num_decode)),
                 logits.take_physical().mem.sprout_ref(compute.ctx()),
-                voc,
+                workspace,
                 compute,
             )
         })
@@ -303,6 +320,7 @@ impl Drop for Transformer {
             resource,
             transfer,
             kernels: _,
+            sample_workspace,
             embed_tokens,
             layers,
             lm_layernorm,
@@ -312,6 +330,7 @@ impl Drop for Transformer {
         resource.apply(|compute| {
             let ctx = compute.ctx();
             transfer.sprout(ctx);
+            sample_workspace.sprout(ctx);
             embed_tokens.take_physical().sprout(ctx);
             lm_layernorm.take_physical().sprout(ctx);
             lm_head.take_physical().sprout(ctx);
@@ -550,17 +569,18 @@ impl Drop for LayerLoader<'_> {
 
 #[test]
 fn test_infer() {
-    cuda::init();
-    if let Some(device) = cuda::Device::fetch() {
-        causal_lm::test_impl::<Transformer>(
-            ModelLoadMeta {
-                device,
-                load_layers: 20,
-            },
-            &[
-                29966, 29989, 1792, 29989, 29958, 13, 29903, 388, 376, 18567, 29908, 304, 592,
-                21106, 29879, 5299, 29989, 465, 22137, 29989, 29958, 13,
-            ],
-        );
-    };
+    if let Err(cuda::NoDevice) = cuda::init() {
+        return;
+    }
+    let device = cuda::Device::new(0);
+    causal_lm::test_impl::<Transformer>(
+        ModelLoadMeta {
+            device,
+            load_layers: 20,
+        },
+        &[
+            29966, 29989, 1792, 29989, 29958, 13, 29903, 388, 376, 18567, 29908, 304, 592, 21106,
+            29879, 5299, 29989, 465, 22137, 29989, 29958, 13,
+        ],
+    );
 }

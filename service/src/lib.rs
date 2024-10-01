@@ -2,15 +2,22 @@
 
 mod session;
 mod session_manager;
-mod template;
+mod tokenizer;
 
 use causal_lm::{CausalLM, SampleArgs};
+use chat_template::ChatTemplate;
 use session::{Dispatcher, Generator};
-use std::{fmt::Debug, path::Path, sync::Arc};
-use template::Template;
-use tokenizer::{BPECommonNormalizer, Normalizer, Tokenizer, VocabTxt, BPE};
+use std::{
+    fmt::{self, Debug},
+    fs::File,
+    path::Path,
+    sync::Arc,
+};
+use tokeneer::{Bpe, Lpe, Tokeneer};
+use tokenizer::{BPECommonNormalizer, Normalizer, Tokenize};
 use tokio::task::JoinHandle;
 
+pub use chat_template::Message;
 pub use session::{BusySession, ChatError, Session};
 pub use session_manager::{SessionError, SessionManager};
 
@@ -27,9 +34,12 @@ pub struct Service<M: CausalLM> {
 /// 推理线程的生命周期与这个组件绑定。
 struct ServiceComponent<M: CausalLM> {
     handle: Arc<Dispatcher<M>>,
-    tokenizer: Box<dyn Tokenizer + Send + Sync>,
+    tokenizer: Box<dyn Tokenize + Send + Sync>,
     normalizer: Box<dyn Normalizer + Send + Sync>,
-    template: Box<dyn Template + Send + Sync>,
+    template: ChatTemplate,
+    bos: String,
+    #[allow(unused)]
+    eos: String,
 }
 
 impl<M: CausalLM> Drop for ServiceComponent<M> {
@@ -50,13 +60,18 @@ where
     pub fn load(model_dir: impl AsRef<Path>, meta: M::Meta) -> (Self, JoinHandle<()>) {
         // Dispatcher器
         let handle = Arc::new(Dispatcher::from(M::load(&model_dir, meta).unwrap()));
+        let tokenizer = tokenizer(&model_dir);
+        let normalizer = normalizer(&model_dir);
+        let template = template(model_dir);
         (
             Self {
                 component: Arc::new(ServiceComponent {
                     handle: handle.clone(),
-                    tokenizer: tokenizer(&model_dir),
-                    normalizer: normalizer(&model_dir),
-                    template: template(model_dir),
+                    bos: tokenizer.decode(handle.model.bos_token()).into(),
+                    eos: tokenizer.decode(handle.model.eos_token()).into(),
+                    tokenizer,
+                    normalizer,
+                    template,
                 }),
                 default_sample: Default::default(),
             },
@@ -71,14 +86,14 @@ impl<M: CausalLM> Service<M> {
     #[inline]
     pub fn launch(&self) -> Session<M> {
         let mut session: Session<M> = self.component.clone().into();
-        session.sample = self.default_sample.clone();
+        session.sample = self.default_sample;
         session
     }
 
     /// 从对话服务启动一个文本生成器。
     #[inline]
-    pub fn generate(&self, prompt: impl AsRef<str>, sample: Option<SampleArgs>) -> Generator<M> {
-        let sample = sample.unwrap_or_else(|| self.default_sample.clone());
+    pub fn generate(&self, prompt: impl fmt::Display, sample: Option<SampleArgs>) -> Generator<M> {
+        let sample = sample.unwrap_or(self.default_sample);
         Generator::new(self.component.clone(), prompt, sample)
     }
 }
@@ -110,7 +125,10 @@ fn test() {
 
     for ((prompt, color), mut session) in zip(tasks, sessions) {
         set.spawn(async move {
-            session.extend([prompt]);
+            session.extend(&[Message {
+                role: "user",
+                content: prompt,
+            }]);
             let mut busy = session.chat();
             while let Some(s) = busy.decode().await {
                 print!("{}", s.color(color));
@@ -123,40 +141,64 @@ fn test() {
     runtime.shutdown_background();
 }
 
-fn template(model_dir: impl AsRef<Path>) -> Box<dyn Template + Send + Sync> {
-    let path: String = model_dir.as_ref().display().to_string();
-    let path = path.to_ascii_lowercase();
-    if path.contains("tinyllama") {
-        Box::new(template::ChatTinyLlama)
+fn template(model_dir: impl AsRef<Path>) -> ChatTemplate {
+    let template = if model_dir
+        .as_ref()
+        .display()
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("tinyllama")
+    {
+        "\
+{%- for message in messages -%}
+    {%- if message['role'] == 'user' -%}
+        {{ '<|user|>\n' + message['content'] + eos_token }}
+    {%- elif message['role'] == 'system' -%}
+        {{ '<|system|>\n' + message['content'] + eos_token }}
+    {%- elif message['role'] == 'assistant' -%}
+        {{ '<|assistant|>\n' + message['content'] + eos_token }}
+    {%- endif -%}
+    {%- if loop.last and add_generation_prompt -%}
+        {{ '<|assistant|>\n' }}
+    {%- endif -%}
+{%- endfor -%}"
     } else {
-        Box::new(template::ChatCPM)
-    }
+        "\
+{%- for message in messages -%}
+    {%- if message['role'] == 'user' -%}
+        {{ bos_token + '<用户>' + message['content'].strip() + '<AI>'}}
+    {%- else -%}
+        {{ message['content'].strip() }}
+    {%- endif -%}
+{%- endfor -%}"
+    };
+    ChatTemplate::new(template.into())
 }
 
 fn normalizer(model_dir: impl AsRef<Path>) -> Box<dyn Normalizer + Send + Sync> {
-    use std::io::ErrorKind::NotFound;
-    match BPE::from_model_file(model_dir.as_ref().join("tokenizer.model")) {
-        Ok(_) => return Box::new(BPECommonNormalizer {}),
-        Err(e) if e.kind() == NotFound => {}
-        Err(e) => panic!("{e:?}"),
+    if model_dir.as_ref().join("tokenizer.model").is_file() {
+        return Box::new(BPECommonNormalizer {});
     }
-    match VocabTxt::from_txt_file(model_dir.as_ref().join("vocabs.txt")) {
-        Ok(_) => return Box::new(()),
-        Err(e) if e.kind() == NotFound => {}
-        Err(e) => panic!("{e:?}"),
+    if model_dir.as_ref().join("vocabs.txt").is_file() {
+        return Box::new(());
     }
     panic!("Tokenizer file not found");
 }
 
-fn tokenizer(model_dir: impl AsRef<Path>) -> Box<dyn Tokenizer + Send + Sync> {
+fn tokenizer(model_dir: impl AsRef<Path>) -> Box<dyn Tokenize + Send + Sync> {
     use std::io::ErrorKind::NotFound;
-    match BPE::from_model_file(model_dir.as_ref().join("tokenizer.model")) {
-        Ok(bpe) => return Box::new(bpe),
+
+    let mmap = |name: &str| {
+        File::open(model_dir.as_ref().join(name)).and_then(|f| unsafe { memmap2::Mmap::map(&f) })
+    };
+
+    match mmap("tokenizer.model") {
+        Ok(f) => return Box::new(Tokeneer::new(Bpe::from_tokenizer_model(&f))),
         Err(e) if e.kind() == NotFound => {}
         Err(e) => panic!("{e:?}"),
     }
-    match VocabTxt::from_txt_file(model_dir.as_ref().join("vocabs.txt")) {
-        Ok(voc) => return Box::new(voc),
+    match mmap("vocabs.txt") {
+        Ok(f) => return Box::new(Tokeneer::new(Lpe::from_vocabs_txt(&f))),
         Err(e) if e.kind() == NotFound => {}
         Err(e) => panic!("{e:?}"),
     }

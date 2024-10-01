@@ -11,12 +11,13 @@ pub(crate) struct CastArgs {
     #[clap(short, long)]
     target: Option<String>,
     /// Target model type.
+    /// avliable value includes: "f32", "f16", "bf16", "float32", etc.
     #[clap(long)]
     dt: Option<String>,
 }
 
 impl CastArgs {
-    pub fn invode(self) {
+    pub fn invoke(self) {
         let ty = match self.dt.as_deref() {
             Some("f32") | Some("float") | Some("float32") | None => F32,
             Some("f16") | Some("half") | Some("float16") => F16,

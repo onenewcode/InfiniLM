@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(serde::Deserialize)]
 pub(crate) struct Infer {
-    pub inputs: Vec<Sentence>,
+    pub messages: Vec<Sentence>,
+    pub encoding: Option<String>,
     pub session_id: Option<String>,
     pub dialog_pos: Option<usize>,
     pub temperature: Option<f32>,
@@ -14,7 +15,6 @@ pub(crate) struct Infer {
 
 #[derive(serde::Deserialize)]
 pub(crate) struct Sentence {
-    #[allow(unused)]
     pub role: String,
     pub content: String,
 }
@@ -82,6 +82,7 @@ impl Success for DropSuccess {
 pub(crate) enum Error {
     Session(SessionError),
     WrongJson(serde_json::Error),
+    InvalidContent(String),
     InvalidDialogPos(usize),
 }
 
@@ -101,6 +102,7 @@ impl Error {
             Self::Session(Busy) => StatusCode::NOT_ACCEPTABLE,
             Self::Session(Duplicate) => StatusCode::CONFLICT,
             Self::WrongJson(_) => StatusCode::BAD_REQUEST,
+            Self::InvalidContent(_) => StatusCode::BAD_REQUEST,
             Self::InvalidDialogPos(_) => StatusCode::RANGE_NOT_SATISFIABLE,
         }
     }
@@ -128,6 +130,7 @@ impl Error {
             Self::Session(Busy) => json(error!(0, "Session is busy")),
             Self::Session(Duplicate) => json(error!(0, "Session ID already exists")),
             Self::WrongJson(e) => json(error!(0, e.to_string())),
+            Self::InvalidContent(e) => json(error!(1, e)),
             &Self::InvalidDialogPos(current_dialog_pos) => {
                 #[derive(serde::Serialize)]
                 struct ErrorBodyExtra {

@@ -11,6 +11,10 @@ impl CausalLM for MixtralCPU {
     type Storage = Blob;
 
     #[inline]
+    fn bos_token(&self) -> utok {
+        self.bos_token
+    }
+    #[inline]
     fn eos_token(&self) -> utok {
         self.eos_token
     }
@@ -221,25 +225,15 @@ impl CausalLM for MixtralCPU {
                     let expert = indices[(tok * self.k + k) as usize];
                     let expert_w = weights[(tok * self.k + k) as usize].to_f32() / sum;
                     let w_gate_up = self.params.mlp_gate_up(layer, expert).transpose(&[1, 0]);
-                    self.kernels.mat_mul(
-                        &mut gate_up_slice,
-                        0.,
-                        &x1_slice,
-                        &w_gate_up,
-                        1.,
-                        &ThisThread,
-                    );
-                    let mut gate_up_slice = gate_up_slice.split(1, &[di as _, di as _]);
-                    let up = gate_up_slice.pop_back().unwrap();
-                    let mut gate = gate_up_slice.pop_back().unwrap();
-                    self.kernels.swiglu(&mut gate, &up, &ThisThread);
-                    let mlp_down = self.params.mlp_down(layer, expert).transpose(&[1, 0]);
-                    self.kernels.mat_mul(
+                    let w_down = self.params.mlp_down(layer, expert).transpose(&[1, 0]);
+                    self.kernels.mlp(
                         &mut x0_slice,
-                        1.,
-                        &gate,
-                        &mlp_down,
+                        &x1_slice,
+                        &mut gate_up_slice,
+                        &w_gate_up,
+                        &w_down,
                         expert_w,
+                        true,
                         &ThisThread,
                     );
                 }
@@ -291,7 +285,14 @@ impl CausalLM for MixtralCPU {
         args.into_iter()
             .flat_map(|meta| repeat(meta.args).take(meta.num_decode))
             .enumerate()
-            .map(|(i, args)| args.random(&common_cpu::slice!(logits; voc; [i])))
+            .map(|(i, args)| {
+                self.kernels.sample(
+                    args.temperature,
+                    args.top_p,
+                    args.top_k,
+                    &common_cpu::slice!(logits; voc; [i]),
+                )
+            })
             .collect()
     }
 }

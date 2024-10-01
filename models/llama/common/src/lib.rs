@@ -84,7 +84,6 @@ impl InferenceConfig {
     }
 
     pub fn duplicate_cache<S>(
-        &self,
         cache: &Tensor<S>,
         pos: upos,
         malloc: impl FnOnce(usize) -> S,

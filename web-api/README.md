@@ -16,6 +16,7 @@
     "role": "user | assistant",
     "content": "string"
 }],
+"encoding": "(base64 | text)?=base64",
 "session_id": "string?",
 "dialog_pos": "integer?=0",
 "temperature": "number?",
@@ -26,6 +27,10 @@
 向 `session_id` 指定的会话或匿名会话的 `dialog_pos` 位置处连接 `messages`，并进行推理。
 
 - `messages` 是必要的，但可以为空列表，不存在时返回[json 解析错误](#json-解析失败)；
+- `encoding` 是可选的，默认值为 `base64`，可选值为 `text`；
+  - `base64`：`messages` 中的 `content` 字段为 base64 编码的文本，将尝试解码，解码失败返回[内容错误](#内容错误)；
+  - `text`：`messages` 中的 `content` 字段为明文文本，将直接使用；
+  - `encoding` 是其他值，直接返回 [内容错误](#内容错误)；
 - `dialog_pos` 不存在：视作 0；
 - `dialog_pos` 为 0
   - `session_id` 不存在
@@ -88,6 +93,14 @@
 "status": 400,
 "code": 0,
 "message": "(Some json error)"
+```
+
+### 内容错误
+
+```json
+"status": 400,
+"code": 1,
+"message": "Unknown encoding: <...>" | "Decode failed: content"
 ```
 
 ### 会话不存在

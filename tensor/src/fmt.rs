@@ -3,11 +3,11 @@ use half::{bf16, f16};
 use std::{fmt, ops::Deref};
 
 pub trait DataFmt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result;
 }
 
 impl DataFmt for f16 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if self == &f16::ZERO {
             write!(f, " ________")
         } else {
@@ -17,7 +17,7 @@ impl DataFmt for f16 {
 }
 
 impl DataFmt for bf16 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if self == &bf16::ZERO {
             write!(f, " ________")
         } else {
@@ -27,7 +27,7 @@ impl DataFmt for bf16 {
 }
 
 impl DataFmt for f32 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if self == &0. {
             write!(f, " ________")
         } else {
@@ -37,7 +37,7 @@ impl DataFmt for f32 {
 }
 
 impl DataFmt for f64 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if self == &0. {
             write!(f, " ________")
         } else {
@@ -47,7 +47,7 @@ impl DataFmt for f64 {
 }
 
 impl<Physical: Deref<Target = [u8]>> fmt::Display for Tensor<Physical> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         macro_rules! write_tensor {
             ($ty:ty) => {
                 write_tensor(f, self.base().cast::<$ty>(), self.shape(), self.strides())
@@ -65,7 +65,7 @@ impl<Physical: Deref<Target = [u8]>> fmt::Display for Tensor<Physical> {
 }
 
 fn write_tensor<T: DataFmt>(
-    f: &mut fmt::Formatter<'_>,
+    f: &mut fmt::Formatter,
     ptr: *const T,
     shape: &[udim],
     strides: &[idim],
@@ -117,7 +117,7 @@ fn write_tensor<T: DataFmt>(
 }
 
 fn write_matrix<T: DataFmt>(
-    f: &mut fmt::Formatter<'_>,
+    f: &mut fmt::Formatter,
     ptr: *const T,
     shape: (udim, udim),
     strides: (idim, idim),

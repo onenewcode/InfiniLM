@@ -7,12 +7,18 @@ macro_rules! slice {
 
 mod gather;
 
-use common::utok;
+use common::{f16, utok};
 use common_devices::{Operators, SliceOn};
+use digit_layout::types::F16;
 use operators::{
-    fuesd_softmax::common_cpu as softmax, mat_mul::common_cpu as mat_mul,
-    reform::common_cpu as reform, rms_norm::common_cpu as rms_norm, rope::common_cpu as rope,
-    swiglu::common_cpu as swiglu, Operator, QueueOf,
+    fuesd_softmax::common_cpu as softmax,
+    mat_mul::common_cpu as mat_mul,
+    mlp::common_cpu as mlp,
+    random_sample::{common_cpu as random_sample, Args, KVPair, SampleArgs},
+    reform::common_cpu as reform,
+    rms_norm::common_cpu as rms_norm,
+    rope::common_cpu as rope,
+    Operator, QueueOf,
 };
 use std::ops::{Deref, DerefMut};
 use tensor::Tensor;
@@ -28,7 +34,24 @@ pub struct CpuKernels {
     rms_norm: rms_norm::Operator,
     rope: rope::Operator,
     softmax: softmax::Operator,
-    swiglu: swiglu::Operator,
+    mlp: mlp::Operator,
+    sample: random_sample::Operator,
+}
+
+impl CpuKernels {
+    pub fn sample(&self, temperature: f32, top_p: f32, top_k: usize, logits: &[f16]) -> utok {
+        let mut kv_pair = KVPair::new(0, f16::ZERO);
+        let mut args = Args::<Cpu>::new(F16, logits.len());
+        args.kv_pair_base = &mut kv_pair as *mut _ as _;
+        args.data_base = logits.as_ptr() as _;
+        args.detail = SampleArgs {
+            temperature,
+            top_p,
+            top_k,
+        };
+        self.sample.launch(&args, &ThisThread).unwrap();
+        kv_pair.idx() as _
+    }
 }
 
 impl Default for CpuKernels {
@@ -39,7 +62,8 @@ impl Default for CpuKernels {
             rms_norm: rms_norm::Operator::new(&Cpu),
             rope: rope::Operator::new(&Cpu),
             softmax: softmax::Operator::new(&Cpu),
-            swiglu: swiglu::Operator::new(&Cpu),
+            mlp: mlp::Operator::new(&Cpu),
+            sample: random_sample::Operator::new(&Cpu),
         }
     }
 }
@@ -76,11 +100,8 @@ impl Operators for CpuKernels {
     ) -> &impl operators::fuesd_softmax::FusedSoftmax<Self::Handle> {
         &self.softmax
     }
-    fn swiglu_op(
-        &self,
-        _: &QueueOf<Self::Handle>,
-    ) -> &impl operators::swiglu::Swiglu<Self::Handle> {
-        &self.swiglu
+    fn mlp_op(&self, _: &QueueOf<Self::Handle>) -> &impl operators::mlp::Mlp<Self::Handle> {
+        &self.mlp
     }
 }
 

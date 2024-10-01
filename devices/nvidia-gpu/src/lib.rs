@@ -1,16 +1,22 @@
 ﻿#![cfg(detected_cuda)]
 
 mod gather;
-mod sample;
 
-use common::utok;
+use common::{f16, utok};
 use common_devices::{Operators, SliceOn};
 use cuda::{AsRaw, Device};
 use digit_layout::types::{F16, U32};
 use operators::{
-    dyn_, fuesd_softmax::nvidia_gpu as softmax, mat_mul::nvidia_gpu as mat_mul,
-    reform::nvidia_gpu as reform, rms_norm::nvidia_gpu as rms_norm, rope::nvidia_gpu as rope,
-    swiglu::nvidia_gpu as swiglu, Operator, QueueOf, TensorLayout,
+    cuda::{memcpy_d2h, DevByte, DevMem, Stream},
+    dyn_,
+    fuesd_softmax::nvidia_gpu as softmax,
+    mat_mul::nvidia_gpu as mat_mul,
+    mlp::nvidia_gpu as mlp,
+    random_sample::{nvidia_gpu as random_sample, KVPair, RandomSample, SampleArgs},
+    reform::nvidia_gpu as reform,
+    rms_norm::nvidia_gpu as rms_norm,
+    rope::nvidia_gpu as rope,
+    Operator, QueueOf, TensorLayout, Workspace,
 };
 use std::{
     collections::HashMap,
@@ -20,8 +26,10 @@ use std::{
 
 pub use common_devices::{Kernels, KernelsA, KernelsB};
 pub use operators::{cuda, nvidia_gpu::Handle as Gpu};
-pub use sample::{sample_cpu, sample_nv};
 pub use tensor::{reslice, reslice_mut, slice, split, udim, LocalSplitable, Tensor};
+
+#[cfg(detected_nccl)]
+pub use operators::nccl;
 
 pub struct NvidiaKernels(HashMap<i32, Internal>);
 
@@ -31,19 +39,21 @@ struct Internal {
     rope: rope::Operator,
     reform: reform::Operator,
     softmax: softmax::Operator,
-    swiglu: swiglu::Operator,
+    mlp: mlp::Operator,
+    random_sample: random_sample::Operator,
 }
 
 impl Internal {
-    pub fn new(handle: &Gpu, d: usize) -> Self {
+    pub fn new(handle: &Gpu, d: usize, voc: usize) -> Self {
+        let hidden_layout = TensorLayout::new(F16, [dyn_(), d.into()], [dyn_(); 2]);
         let mat_mul = mat_mul::Operator::new(handle);
 
         let mut rms_norm = rms_norm::Operator::new(handle);
         rms_norm
             .scheme(&operators::rms_norm::Args {
-                y_layout: TensorLayout::new(F16, [dyn_(), d.into()], [dyn_(); 2]),
+                y_layout: hidden_layout.clone(),
                 y_base: null_mut(),
-                x_layout: TensorLayout::new(F16, [dyn_(), d.into()], [dyn_(); 2]),
+                x_layout: hidden_layout.clone(),
                 x_base: null(),
                 w_layout: TensorLayout::new(F16, [d.into()], [dyn_()]),
                 w_base: null(),
@@ -79,14 +89,26 @@ impl Internal {
             })
             .unwrap();
 
-        let mut swiglu = swiglu::Operator::new(handle);
-        swiglu
-            .scheme(&operators::swiglu::Args {
-                gate_layout: TensorLayout::new(F16, [dyn_(); 2], [dyn_(); 2]),
-                gate_base: null_mut(),
-                up_layout: TensorLayout::new(F16, [dyn_(); 2], [dyn_(); 2]),
-                up_base: null(),
-            })
+        let mut mlp = mlp::Operator::new(handle);
+        mlp.scheme(&operators::mlp::Args {
+            y_layout: hidden_layout.clone(),
+            y_base: null_mut(),
+            x_layout: hidden_layout.clone(),
+            x_base: null(),
+            gate_up_layout: TensorLayout::new(F16, [dyn_(); 2], [dyn_(); 2]),
+            gate_up_base: null_mut(),
+            w_gate_up_layout: TensorLayout::new(F16, [dyn_(); 2], [dyn_(); 2]),
+            w_gate_up_base: null(),
+            w_down_layout: TensorLayout::new(F16, [dyn_(); 2], [dyn_(); 2]),
+            w_down_base: null(),
+            down_alpha: 1.,
+            down_bias: true,
+        })
+        .unwrap();
+
+        let mut random_sample = random_sample::Operator::new(handle);
+        random_sample
+            .scheme(&operators::random_sample::Args::new(F16, voc))
             .unwrap();
 
         Self {
@@ -95,30 +117,67 @@ impl Internal {
             rope,
             reform,
             softmax,
-            swiglu,
+            mlp,
+            random_sample,
         }
     }
 }
 
 impl NvidiaKernels {
-    pub fn new(devices: &[Device], rms_norm_size: usize) -> Self {
+    pub fn new(devices: &[Device], rms_norm_size: usize, voc_size: usize) -> Self {
         Self(
             devices
                 .iter()
                 .map(|d| {
                     (
                         unsafe { d.as_raw() },
-                        Internal::new(&Gpu::new(d.retain_primary()), rms_norm_size),
+                        Internal::new(&Gpu::new(d.retain_primary()), rms_norm_size, voc_size),
                     )
                 })
                 .collect(),
         )
     }
-}
 
-impl NvidiaKernels {
     fn get(&self, queue: &QueueOf<Gpu>) -> &Internal {
         self.0.get(&unsafe { queue.ctx().dev().as_raw() }).unwrap()
+    }
+
+    pub fn sample_workspace<'ctx>(&self, queue: &QueueOf<'ctx, Gpu>) -> DevMem<'ctx> {
+        self.get(queue).random_sample.workspace(queue)
+    }
+
+    pub fn sample(
+        &self,
+        voc_size: usize,
+        args: impl IntoIterator<Item = SampleArgs>,
+        logits: &[DevByte],
+        workspace: &mut [DevByte],
+        stream: &Stream,
+    ) -> Vec<utok> {
+        let random_sample = &self.get(stream).random_sample;
+        let logits = logits.as_ptr();
+
+        let details = args.into_iter().collect::<Vec<_>>();
+        let kv_pair_size = KVPair::<()>::LAYOUT.nbytes();
+        let mut kv_pairs = stream.malloc::<u8>(details.len() * kv_pair_size);
+
+        let mut args = operators::random_sample::Args::<Gpu>::new(F16, voc_size);
+        args.workspace = Workspace {
+            ptr: workspace.as_mut_ptr(),
+            len: workspace.len(),
+        };
+        for (i, detail) in details.iter().enumerate() {
+            args.kv_pair_base = unsafe { kv_pairs.as_mut_ptr().add(i * kv_pair_size) };
+            args.data_base = unsafe { logits.add(i * voc_size * F16.nbytes()) };
+            args.detail = *detail;
+            random_sample.launch(&args, stream).unwrap();
+        }
+
+        let mut host = vec![KVPair::new(0, f16::ZERO); details.len()];
+        stream.synchronize();
+        memcpy_d2h(&mut host, &kv_pairs);
+
+        host.into_iter().map(|kv| kv.idx() as _).collect()
     }
 }
 
@@ -159,11 +218,8 @@ impl Operators for NvidiaKernels {
         &self.get(queue).softmax
     }
 
-    fn swiglu_op(
-        &self,
-        queue: &QueueOf<Self::Handle>,
-    ) -> &impl operators::swiglu::Swiglu<Self::Handle> {
-        &self.get(queue).swiglu
+    fn mlp_op(&self, queue: &QueueOf<Self::Handle>) -> &impl operators::mlp::Mlp<Self::Handle> {
+        &self.get(queue).mlp
     }
 }
 
@@ -186,7 +242,9 @@ impl KernelsB for NvidiaKernels {
 }
 
 pub fn synchronize() {
-    cuda::init();
+    if let Err(cuda::NoDevice) = cuda::init() {
+        return;
+    }
     for i in 0..cuda::Device::count() {
         cuda::Device::new(i as _)
             .retain_primary()
