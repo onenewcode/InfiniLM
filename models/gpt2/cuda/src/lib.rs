@@ -1,5 +1,4 @@
-#![cfg(driver_detected)]
-
+#![cfg(any(use_nvidia, use_iluvatar))]
 use common::Slab;
 use gpt2::{
     storage::{BlkStorage, Storage},
@@ -8,7 +7,7 @@ use gpt2::{
 use log::trace;
 use operators::{
     all_reduce::{AllReduce, NonAllReduce},
-    cuda::{memcpy_d2h, AsRaw, CurrentCtx, DevByte, DevMem, Event, Gpu, HostMem, Stream},
+    cuda::{memcpy_d2h, AsRaw, CurrentCtx, DevByte, DevMem, Event, Gpu, HostMem, Stream,},
     random_sample::cuda::Operator as RandomSampleGpu,
     rearrange::cuda::Operator as Rearrange,
     ByteOf, QueueOf, TopoNode,
@@ -116,11 +115,11 @@ impl<'blk> Weights<'blk> {
         };
 
         Self {
-            pos_embd: stream.from_host(model.pos_embd),
+            pos_embd: ctx.from_host(model.pos_embd),
             blks,
-            output_norm_w: stream.from_host(model.output_norm_w),
-            output_norm_b: stream.from_host(model.output_norm_b),
-            output: stream.from_host(model.output),
+            output_norm_w: ctx.from_host(model.output_norm_w),
+            output_norm_b: ctx.from_host(model.output_norm_b),
+            output: ctx.from_host(model.output),
         }
     }
 }
@@ -186,7 +185,7 @@ impl<'ctx> H2DLoader<'ctx> {
         Self {
             event: stream.record(),
             host: stream.ctx().malloc_host::<u8>(size),
-            dev: stream.malloc::<u8>(size),
+            dev: stream.ctx().malloc::<u8>(size),
         }
     }
 
@@ -206,7 +205,7 @@ impl<'ctx> H2DLoader<'ctx> {
         stream.memcpy_h2d(&mut self.dev, &self.host);
         self.event = stream.record();
         (
-            replace(&mut self.dev, stream.malloc::<u8>(self.host.len())),
+            replace(&mut self.dev, stream.ctx().malloc::<u8>(self.host.len())),
             cache,
         )
     }

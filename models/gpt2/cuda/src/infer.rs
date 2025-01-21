@@ -2,9 +2,9 @@ use crate::{Operators, RandomSample, Weights};
 use gguf::{ggml_quants::digit_layout::types, GGufModel};
 use gpt2::{ext::ggml_quants::f16, Gpt2Meta, Gpt2Worker, Storage, Tensor};
 use operators::{
-    cuda::{self, Config, Device, Gpu, NoDevice},
+    cuda::{self, Config, Device, Gpu, NoDevice, StreamMemPool},
     random_sample::{KVPair, SampleArgs},
-    Blob,
+    Blob, QueueAlloc,
 };
 use std::slice::from_raw_parts_mut;
 use test_utils::{Inference, TokenizerAndPrompt};
@@ -52,28 +52,30 @@ fn test_infer() {
 
     gpu.apply(|ctx| {
         let stream = ctx.stream();
-        let token_embd = stream.from_host(model.token_embd);
-
+        let token_embd = ctx.from_host(model.token_embd);
+        let (free, _) = ctx.mem_info();
+        let queue_alloc = StreamMemPool::new(stream);
+        queue_alloc.put((free.0 >> 30) << 30);
         let weights = Weights::new(&model, ctx);
 
         let mut worker = Worker::new(0, &gpu, meta.clone(), weights);
-        let mut cache = meta.kv_cache(nctx).map(|size| stream.malloc::<u8>(size));
-        let indices = RandomSample::build_indices(nvoc, &stream);
+        let mut cache = meta.kv_cache(nctx).map(|size| ctx.malloc::<u8>(size));
+        let indices = RandomSample::build_indices(nvoc, &queue_alloc);
         let sample = RandomSample::new(gpu);
 
         test_utils::test_infer(eos, tokenizer, &prompt, max_steps, |input, pos| {
-            let mut embd = meta.embd(input.len()).map(|len| stream.malloc::<u8>(len));
-            let mut logits = meta.logits(1).map(|len| stream.malloc::<u8>(len));
+            let mut embd = meta.embd(input.len()).map(|len| ctx.malloc::<u8>(len));
+            let mut logits = meta.logits(1).map(|len| ctx.malloc::<u8>(len));
             let d = embd.get().len() / input.len();
             for (i, &tok) in input.iter().enumerate() {
-                stream.memcpy_d2d(
+                queue_alloc.queue().memcpy_d2d(
                     &mut embd.get_mut()[i * d..][..d],
                     &token_embd[tok as usize * d..][..d],
                 )
             }
             let mut idx =
-                Tensor::new(types::U32, &[1, input.len()]).map(|len| stream.malloc::<u8>(len));
-            stream.memcpy_h2d(&mut idx.get_mut(), postion(input.len(), pos).get());
+            Tensor::new(types::U32, &[1, input.len()]).map(|len| ctx.malloc::<u8>(len));
+            queue_alloc.queue().memcpy_h2d(&mut idx.get_mut(), postion(input.len(), pos).get());
             worker
                 .launch(
                     gpt2::args::Args {
@@ -90,14 +92,14 @@ fn test_infer() {
                         max_att_len: pos + input.len(),
                     },
                     &mut [],
-                    &stream,
+                    &queue_alloc,
                 )
                 .unwrap();
 
-            let mut pairs = Tensor::kv_pair_vec(1, |size| stream.malloc::<u8>(size));
+            let mut pairs = Tensor::kv_pair_vec(1, |size| ctx.malloc::<u8>(size));
 
             sample
-                .launch(&mut pairs, &logits, &indices, sample_args, &mut [], &stream)
+                .launch(&mut pairs, &logits, &indices, sample_args, &mut [],    &queue_alloc,)
                 .unwrap();
 
             let mut pair = KVPair::new(0, f16::ZERO);
