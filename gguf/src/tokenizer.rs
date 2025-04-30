@@ -1,11 +1,11 @@
-﻿use super::GGufModel;
+use super::GGufModel;
 use ggus::{GGmlTokenType, GGufMetaMapExt};
 use std::{
     borrow::Cow,
     collections::HashMap,
     str::{from_utf8, from_utf8_unchecked},
 };
-use tokeneer::{utok, Bpe, Lpe, TokenType, Tokeneer};
+use tokeneer::{utok, Bpe, Gpt2Tokenizer, Lpe, TokenType, Tokeneer};
 
 pub struct Tokenizer {
     tokenize: Box<dyn Tokenize>,
@@ -17,7 +17,7 @@ impl GGufModel<'_> {
     pub fn tokenizer(&self) -> Tokenizer {
         match self.tokenizer_ggml_model().unwrap() {
             "llama" => Tokenizer::bpe_from_gguf(self),
-            "gpt2" => Tokenizer::lpe_from_gguf(self, true),
+            "gpt2" => Tokenizer::gpt_from_gguf(self),
             "fm9g8b" => Tokenizer::lpe_from_gguf(self, false),
             model => panic!("Unsupported tokenizer model: {model}"),
         }
@@ -146,6 +146,23 @@ impl Tokenizer {
             de_replace: HashMap::new(),
         }
     }
+    fn gpt_from_gguf(gguf: &GGufModel) -> Self {
+        let gpt2 = Gpt2Tokenizer::load_gguf(gguf);
+        let tokens = gguf.tokenizer_ggml_tokens().unwrap();
+
+        let mut detective = SpaceDetective::new();
+        tokens
+            .into_iter()
+            .for_each(|piece| detective.record(piece.unwrap()));
+
+        let tokeneer = Tokeneer::new(gpt2);
+
+        Self {
+            tokenize: Box::new(tokeneer),
+            en_replace: unicode_utf8_to_byte_map(),
+            de_replace: unicode_byte_to_utf8_map(),
+        }
+    }
 }
 
 /// A trait for tokenization.
@@ -226,6 +243,70 @@ impl SpaceDetective {
     }
 }
 
+/// 创建一个从字节到 UTF-8 字符串的映射
+fn unicode_byte_to_utf8_map() -> HashMap<char, char> {
+    let mut map = HashMap::new();
+
+    // 映射 ASCII 可打印字符 '!' 到 '~'
+    for ch in 0x21..=0x7E {
+        map.insert(char::from_u32(ch).unwrap(), char::from_u32(ch).unwrap());
+    }
+
+    // 映射拉丁字符 '¡' 到 '¬'
+    for ch in 0xA1..=0xAC {
+        map.insert(char::from_u32(ch).unwrap(), char::from_u32(ch).unwrap());
+    }
+
+    // 映射拉丁字符 '®' 到 'ÿ'
+    for ch in 0xAE..=0xFF {
+        map.insert(char::from_u32(ch).unwrap(), char::from_u32(ch).unwrap());
+    }
+
+    // 为剩余的字节值分配映射
+    let mut n = 0;
+    for ch in 0..256 {
+        if !map.contains_key(&char::from_u32(ch).unwrap()) {
+            map.insert(
+                char::from_u32(256 + n).unwrap(),
+                char::from_u32(ch).unwrap(),
+            );
+            n += 1;
+        }
+    }
+    map
+}
+/// 创建一个从字节到 UTF-8 字符串的映射
+fn unicode_utf8_to_byte_map() -> HashMap<char, char> {
+    let mut map = HashMap::new();
+
+    // 映射 ASCII 可打印字符 '!' 到 '~'
+    for ch in 0x21..=0x7E {
+        map.insert(char::from_u32(ch).unwrap(), char::from_u32(ch).unwrap());
+    }
+
+    // 映射拉丁字符 '¡' 到 '¬'
+    for ch in 0xA1..=0xAC {
+        map.insert(char::from_u32(ch).unwrap(), char::from_u32(ch).unwrap());
+    }
+
+    // 映射拉丁字符 '®' 到 'ÿ'
+    for ch in 0xAE..=0xFF {
+        map.insert(char::from_u32(ch).unwrap(), char::from_u32(ch).unwrap());
+    }
+
+    // 为剩余的字节值分配映射
+    let mut n = 0;
+    for ch in 0..256 {
+        if !map.contains_key(&char::from_u32(ch).unwrap()) {
+            map.insert(
+                char::from_u32(ch).unwrap(),
+                char::from_u32(256 + n).unwrap(),
+            );
+            n += 1;
+        }
+    }
+    map
+}
 #[test]
 fn test_load() {
     use test_utils::Inference;
