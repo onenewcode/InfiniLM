@@ -22,10 +22,14 @@ type Worker<'w> = LlamaWorker<Operators<InprocNode<usize>, AllReduce>, Weights<'
 
 #[test]
 fn test_infer() {
+    std::env::set_var(
+        "TEST_MODEL",
+        r"D:\ProjectRust\InfiniLM\Split-DeepSeek-R1-Distill-Qwen-1.5B-v0.0-F16.gguf",
+    );
     let Some(Inference {
         model,
         devices,
-        prompt,
+        mut prompt,
         as_user,
         temperature,
         top_p,
@@ -35,6 +39,7 @@ fn test_infer() {
     else {
         return;
     };
+    prompt="给我讲一个故事".to_string();
     let gguf = GGufModel::read(model.iter().map(|s| &**s));
 
     let TokenizerAndPrompt {

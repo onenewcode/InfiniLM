@@ -1,11 +1,11 @@
-use super::GGufModel;
+﻿use super::GGufModel;
 use ggus::{GGmlTokenType, GGufMetaMapExt};
 use std::{
     borrow::Cow,
     collections::HashMap,
     str::{from_utf8, from_utf8_unchecked},
 };
-use tokeneer::{utok, Bpe, Gpt2Tokenizer, Lpe, TokenType, Tokeneer};
+use tokeneer::{utok, Bpe, Lpe, TokenType, Tokeneer};
 
 pub struct Tokenizer {
     tokenize: Box<dyn Tokenize>,
@@ -46,18 +46,18 @@ impl Tokenizer {
 
     pub fn decode(&self, token: utok) -> Cow<str> {
         let piece = self.tokenize.decode(token);
-        if let Ok(piece) = from_utf8(piece) {
+        if let Ok(piece) = from_utf8(&piece) {
             let ans = piece
                 .chars()
                 .map(|c| *self.de_replace.get(&c).unwrap_or(&c))
                 .collect::<String>();
             if ans == piece {
-                piece.into()
+                piece.to_string().into()
             } else {
                 ans.into()
             }
         } else {
-            unsafe { from_utf8_unchecked(piece) }.into()
+            String::from_utf8_lossy(&piece).into_owned().into()
         }
     }
 
@@ -87,7 +87,7 @@ impl Tokenizer {
         });
 
         let unk = gguf.tokenizer_ggml_unknown_token_id().unwrap();
-        let tokeneer = Tokeneer::new(Bpe::new(vocabs, scores, token_type, unk));
+        let tokeneer = Tokeneer::new(Bpe::new(vocabs, scores, token_type, unk,tokeneer::Model::LLaMa));
         let (en_replace, de_replace) = detective.build_map();
         Self {
             tokenize: Box::new(tokeneer),
@@ -147,18 +147,8 @@ impl Tokenizer {
         }
     }
     fn gpt_from_gguf(gguf: &GGufModel) -> Self {
-        let gpt2 = Gpt2Tokenizer::load_gguf(gguf);
-        let tokens = gguf.tokenizer_ggml_tokens().unwrap();
-
-        let mut detective = SpaceDetective::new();
-        tokens
-            .into_iter()
-            .for_each(|piece| detective.record(piece.unwrap()));
-
-        let tokeneer = Tokeneer::new(gpt2);
-
         Self {
-            tokenize: Box::new(tokeneer),
+            tokenize: Box::new(Bpe::from_gguf(gguf)),
             en_replace: unicode_utf8_to_byte_map(),
             de_replace: unicode_byte_to_utf8_map(),
         }
@@ -170,7 +160,7 @@ trait Tokenize {
     /// Encode a text into a sequence of tokens.
     fn encode(&self, text: &str) -> Vec<utok>;
     /// Decode a token into str.
-    fn decode(&self, token: utok) -> &[u8];
+    fn decode(&self, token: utok) -> Cow<'_, [u8]> ;
 }
 
 impl<M: tokeneer::Method> Tokenize for Tokeneer<M> {
@@ -179,7 +169,7 @@ impl<M: tokeneer::Method> Tokenize for Tokeneer<M> {
         self.encode(text)
     }
     #[inline]
-    fn decode(&self, token: utok) -> &[u8] {
+    fn decode(&self, token: utok) -> Cow<'_, [u8]> {
         self.internal().decode(token)
     }
 }
